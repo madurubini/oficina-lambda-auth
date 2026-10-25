@@ -63,7 +63,9 @@ Resources:
 
   # Encaminha para o app mantendo o caminho original da requisição
   # (/api/v1/clientes → http://<load-balancer>/api/v1/clientes). Todas as
-  # rotas que vão para o app usam esta mesma integração.
+  # rotas que vão para o app usam esta mesma integração. O x-request-id leva o
+  # id da requisição no Gateway: o app usa o mesmo valor nos logs e no New
+  # Relic, e dá para seguir uma chamada do Gateway até o banco.
   IntegracaoApp:
     Type: AWS::ApiGatewayV2::Integration
     Properties:
@@ -74,6 +76,7 @@ Resources:
       PayloadFormatVersion: '1.0'
       RequestParameters:
         overwrite:path: $request.path
+        overwrite:header.x-request-id: $context.requestId
 
   Autorizador:
     Type: AWS::ApiGatewayV2::Authorizer
