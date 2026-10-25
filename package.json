@@ -1,0 +1,26 @@
+{
+  "name": "oficina-lambda-auth",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Lambdas de autenticação da Oficina: login do cliente por CPF e Authorizer do API Gateway.",
+  "scripts": {
+    "verificar": "tsc --noEmit",
+    "test": "jest",
+    "test:cov": "jest --coverage"
+  },
+  "dependencies": {
+    "jsonwebtoken": "^9.0.3",
+    "pg": "^8.23.1"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.164",
+    "@types/jest": "^30.0.0",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^22.20.5",
+    "@types/pg": "^8.23.1",
+    "esbuild": "^0.28.2",
+    "jest": "^30.5.2",
+    "ts-jest": "^29.4.15",
+    "typescript": "^5.9.3"
+  }
+}

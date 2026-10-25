@@ -1,0 +1,235 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Portaria da Oficina: API Gateway (HTTP API) na frente do oficina-app, Lambda
+  auth-cpf (login do cliente por CPF) e Lambda Authorizer (confere o JWT).
+  Uma stack por ambiente: oficina-auth-homolog e oficina-auth-prod.
+
+# Todos os valores que vêm de outros repositórios chegam por parâmetro; o
+# pipeline os descobre na AWS a cada deploy (nada copiado à mão).
+Parameters:
+  Ambiente:
+    Type: String
+    AllowedValues: [homolog, prod]
+    Description: Namespace do app no EKS e schema do banco.
+  LabRoleArn:
+    Type: String
+    Description: >
+      ARN da LabRole. O Learner Lab não deixa criar roles do IAM, então as
+      Lambdas usam a role pronta em vez da que o SAM criaria.
+  HostDaAplicacao:
+    Type: String
+    Description: Endereço do Load Balancer do oficina-app no namespace do ambiente.
+  DbHost:
+    Type: String
+  DbNome:
+    Type: String
+    Default: oficina
+  DbUsuario:
+    Type: String
+    Default: oficina_auth
+    Description: Usuário somente-leitura (SELECT em cliente), criado pelo pipeline.
+  DbSenha:
+    Type: String
+    NoEcho: true
+  JwtSecret:
+    Type: String
+    NoEcho: true
+    Description: O mesmo JWT_SECRET do oficina-app.
+  JwtExpiraEmSegundos:
+    Type: Number
+    Default: 3600
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnets da VPC do repo oficina-infra-k8s.
+  SecurityGroupLambdas:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security group oficina-lambdas, criado no repo oficina-infra-db.
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Architectures: [x86_64]
+    MemorySize: 256
+    Timeout: 10
+
+Resources:
+  # ─────────────── Gateway ───────────────
+
+  Api:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      Description: !Sub Entrada única da Oficina (${Ambiente})
+
+  # Encaminha para o app mantendo o caminho original da requisição
+  # (/api/v1/clientes → http://<load-balancer>/api/v1/clientes). Todas as
+  # rotas que vão para o app usam esta mesma integração.
+  IntegracaoApp:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref Api
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: ANY
+      IntegrationUri: !Sub http://${HostDaAplicacao}
+      PayloadFormatVersion: '1.0'
+      RequestParameters:
+        overwrite:path: $request.path
+
+  Autorizador:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref Api
+      Name: jwt
+      AuthorizerType: REQUEST
+      AuthorizerUri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Authorizer.Arn}/invocations
+      AuthorizerPayloadFormatVersion: '2.0'
+      EnableSimpleResponses: true
+      # Sem o cabeçalho, o próprio Gateway responde 401 sem chamar a Lambda.
+      IdentitySource: [$request.header.Authorization]
+      # Sem cache: um token recusado agora não fica liberado por engano.
+      AuthorizerResultTtlInSeconds: 0
+
+  # Rota protegida: tudo em /api/v1 passa pelo Authorizer...
+  RotaProtegida:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: ANY /api/v1/{proxy+}
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref Autorizador
+      Target: !Sub integrations/${IntegracaoApp}
+
+  # ...menos estas, que são públicas por natureza. O Gateway escolhe sempre a
+  # rota mais específica, então elas vencem a {proxy+} acima.
+  RotaLoginGestor:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: POST /api/v1/auth/login
+      Target: !Sub integrations/${IntegracaoApp}
+
+  RotaHealth:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: GET /api/v1/health
+      Target: !Sub integrations/${IntegracaoApp}
+
+  RotaHealthSondas:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: GET /api/v1/health/{proxy+}
+      Target: !Sub integrations/${IntegracaoApp}
+
+  # Swagger: a página, os arquivos dela e o JSON do contrato.
+  RotaSwagger:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: GET /api/docs
+      Target: !Sub integrations/${IntegracaoApp}
+
+  RotaSwaggerArquivos:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: GET /api/docs/{proxy+}
+      Target: !Sub integrations/${IntegracaoApp}
+
+  RotaSwaggerJson:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: GET /api/docs-json
+      Target: !Sub integrations/${IntegracaoApp}
+
+  # ─────────────── Lambdas ───────────────
+
+  AuthCpf:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub oficina-auth-cpf-${Ambiente}
+      Description: Login do cliente por CPF → JWT
+      # O Learner Lab não deixa criar roles do IAM: usa a LabRole pronta.
+      Role: !Ref LabRoleArn
+      CodeUri: .
+      Handler: handler.handler
+      # Dentro da VPC para alcançar o RDS, que não tem IP público.
+      VpcConfig:
+        SubnetIds: !Ref SubnetIds
+        SecurityGroupIds: [!Ref SecurityGroupLambdas]
+      Environment:
+        Variables:
+          DB_HOST: !Ref DbHost
+          DB_NAME: !Ref DbNome
+          DB_USER: !Ref DbUsuario
+          DB_PASSWORD: !Ref DbSenha
+          DB_SCHEMA: !Ref Ambiente
+          JWT_SECRET: !Ref JwtSecret
+          JWT_EXPIRES_IN_SEGUNDOS: !Ref JwtExpiraEmSegundos
+      LoggingConfig:
+        LogGroup: !Ref LogsAuthCpf
+      Events:
+        Login:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Method: POST
+            Path: /auth/cpf
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        EntryPoints: [src/auth-cpf/handler.ts]
+        Target: es2022
+        Minify: true
+        Sourcemap: false
+
+  Authorizer:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub oficina-authorizer-${Ambiente}
+      Description: Confere o JWT antes de encaminhar para o app
+      Role: !Ref LabRoleArn
+      CodeUri: .
+      Handler: handler.handler
+      Environment:
+        Variables:
+          JWT_SECRET: !Ref JwtSecret
+      LoggingConfig:
+        LogGroup: !Ref LogsAuthorizer
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        EntryPoints: [src/authorizer/handler.ts]
+        Target: es2022
+        Minify: true
+        Sourcemap: false
+
+  # O Gateway precisa de permissão para chamar o Authorizer.
+  PermissaoAutorizador:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref Authorizer
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${Api}/authorizers/${Autorizador}
+
+  # Grupos de log declarados na stack: somem junto no `sam delete` em vez de
+  # ficarem órfãos, e guardam só 7 dias (custo).
+  LogsAuthCpf:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/oficina-auth-cpf-${Ambiente}
+      RetentionInDays: 7
+
+  LogsAuthorizer:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/oficina-authorizer-${Ambiente}
+      RetentionInDays: 7
+
+Outputs:
+  UrlDoGateway:
+    Description: Endereço público da Oficina neste ambiente.
+    Value: !Sub https://${Api}.execute-api.${AWS::Region}.amazonaws.com

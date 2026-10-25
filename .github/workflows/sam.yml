@@ -1,0 +1,259 @@
+# Pipeline das funções serverless e do API Gateway.
+#
+# - Pull request (para homolog ou main): testes, validação e build do SAM. É o
+#   check obrigatório da ruleset.
+# - Push em homolog: deploy da stack oficina-auth-homolog (Gateway → namespace homolog).
+# - Push em main: deploy da stack oficina-auth-prod (Gateway → namespace prod).
+# - Manual (workflow_dispatch): destroy das duas stacks, para a rotina
+#   subir → testar → derrubar do Learner Lab.
+#
+# Depende dos outros três repositórios no ar (ordem: ① → ② → ③ → ④): a VPC e o
+# cluster, o RDS e o oficina-app já implantado no namespace do ambiente.
+name: SAM
+
+on:
+  pull_request:
+    branches: [homolog, main]
+  push:
+    branches: [homolog, main]
+  workflow_dispatch:
+    inputs:
+      confirmacao:
+        description: 'Digite "destruir" para apagar o Gateway e as Lambdas dos dois ambientes'
+        required: true
+
+concurrency:
+  group: sam-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  # Nomes criados pelos outros repositórios.
+  CLUSTER: oficina-eks
+  RDS_IDENTIFICADOR: oficina-db
+  SG_LAMBDAS: oficina-lambdas
+  SAM_CLI_TELEMETRY: '0'
+  # CPFs válidos usados no smoke test: um cliente de demonstração, criado pelo
+  # próprio teste, e um que nunca é cadastrado.
+  CPF_DEMONSTRACAO: '52998224725'
+  CPF_SEM_CADASTRO: '39053344705'
+
+permissions:
+  contents: read
+
+jobs:
+  testes:
+    name: Build e testes
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Instalar dependências
+        run: npm ci
+
+      - name: Tipos (tsc)
+        run: npm run verificar
+
+      - name: Testes com cobertura
+        run: npm run test:cov
+
+      - uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+
+      - name: Validar o template
+        run: sam validate --lint --region "$AWS_REGION"
+
+      # O SAM instala só as dependências de produção na pasta de build; o
+      # esbuild do projeto entra pelo PATH.
+      - name: Build
+        run: PATH="$PWD/node_modules/.bin:$PATH" sam build
+
+  deploy:
+    name: Deploy do Gateway e das Lambdas
+    needs: testes
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_name == 'main' && 'producao' || 'homolog' }}
+    env:
+      AMBIENTE: ${{ github.ref_name == 'main' && 'prod' || 'homolog' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Instalar dependências
+        run: npm ci
+
+      - uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+
+      - name: Credenciais da AWS (sessão do Learner Lab)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Apontar o kubectl para o cluster
+        run: aws eks update-kubeconfig --region "$AWS_REGION" --name "$CLUSTER"
+
+      # Tudo o que vem dos outros repositórios é lido da AWS na hora, pelos
+      # nomes combinados — nada copiado à mão.
+      - name: Descobrir a infraestrutura
+        id: infra
+        run: |
+          LAB_ROLE=$(aws iam get-role --role-name LabRole --query Role.Arn --output text)
+
+          read -r DB_HOST DB_PORTA DB_ADMIN DB_NOME VPC_ID <<< "$(aws rds describe-db-instances \
+            --db-instance-identifier "$RDS_IDENTIFICADOR" \
+            --query 'DBInstances[0].[Endpoint.Address,Endpoint.Port,MasterUsername,DBName,DBSubnetGroup.VpcId]' \
+            --output text)"
+
+          SG=$(aws ec2 describe-security-groups \
+            --filters "Name=group-name,Values=$SG_LAMBDAS" "Name=vpc-id,Values=$VPC_ID" \
+            --query 'SecurityGroups[0].GroupId' --output text)
+          SUBNETS=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" \
+            --query 'Subnets[].SubnetId' --output text | tr '\t' ',')
+
+          APP=$(kubectl get svc oficina-api -n "$AMBIENTE" \
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+          if [ -z "$APP" ]; then
+            echo "::error::O oficina-app não está no ar no namespace $AMBIENTE. Faça o deploy do repo ③ antes."
+            exit 1
+          fi
+
+          {
+            echo "lab_role=$LAB_ROLE"
+            echo "db_host=$DB_HOST"
+            echo "db_porta=$DB_PORTA"
+            echo "db_admin=$DB_ADMIN"
+            echo "db_nome=$DB_NOME"
+            echo "sg=$SG"
+            echo "subnets=$SUBNETS"
+            echo "app=$APP"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Usuário somente-leitura no banco
+        env:
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          DB_PASSWORD_LEITURA: ${{ secrets.DB_PASSWORD_LEITURA }}
+        run: |
+          kubectl create secret generic oficina-auth-db -n "$AMBIENTE" \
+            --from-literal=PGHOST="${{ steps.infra.outputs.db_host }}" \
+            --from-literal=PGPORT="${{ steps.infra.outputs.db_porta }}" \
+            --from-literal=PGUSER="${{ steps.infra.outputs.db_admin }}" \
+            --from-literal=PGDATABASE="${{ steps.infra.outputs.db_nome }}" \
+            --from-literal=PGPASSWORD="$DB_PASSWORD" \
+            --from-literal=SENHA_LEITURA="$DB_PASSWORD_LEITURA" \
+            --from-literal=ESQUEMA="$AMBIENTE" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl delete job usuario-leitura-auth -n "$AMBIENTE" --ignore-not-found
+          kubectl apply -n "$AMBIENTE" -f k8s/usuario-leitura.yaml
+          kubectl wait --for=condition=complete job/usuario-leitura-auth \
+            -n "$AMBIENTE" --timeout=180s
+          kubectl logs job/usuario-leitura-auth -n "$AMBIENTE"
+
+      - name: Build
+        run: PATH="$PWD/node_modules/.bin:$PATH" sam build
+
+      # O pacote vai para o mesmo bucket do state do Terraform, numa pasta à
+      # parte: o SAM não precisa criar um bucket só para ele.
+      - name: Deploy
+        env:
+          DB_PASSWORD_LEITURA: ${{ secrets.DB_PASSWORD_LEITURA }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+        run: |
+          sam deploy \
+            --stack-name "oficina-auth-$AMBIENTE" \
+            --region "$AWS_REGION" \
+            --s3-bucket "${{ vars.TF_STATE_BUCKET }}" \
+            --s3-prefix "sam/$AMBIENTE" \
+            --capabilities CAPABILITY_IAM \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides \
+              "Ambiente=$AMBIENTE" \
+              "LabRoleArn=${{ steps.infra.outputs.lab_role }}" \
+              "HostDaAplicacao=${{ steps.infra.outputs.app }}" \
+              "DbHost=${{ steps.infra.outputs.db_host }}" \
+              "DbNome=${{ steps.infra.outputs.db_nome }}" \
+              "DbSenha=$DB_PASSWORD_LEITURA" \
+              "JwtSecret=$JWT_SECRET" \
+              "SubnetIds=${{ steps.infra.outputs.subnets }}" \
+              "SecurityGroupLambdas=${{ steps.infra.outputs.sg }}"
+
+      # Prova, pelo Gateway, cada regra da portaria.
+      - name: Smoke test pelo Gateway
+        run: |
+          URL=$(aws cloudformation describe-stacks --stack-name "oficina-auth-$AMBIENTE" \
+            --query "Stacks[0].Outputs[?OutputKey=='UrlDoGateway'].OutputValue" --output text)
+          echo "Gateway em $URL"
+          JSON='Content-Type: application/json'
+
+          status() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+          confere() {
+            if [ "$2" != "$3" ]; then echo "::error::$1: esperado $3, veio $2"; exit 1; fi
+            echo "ok  $1 → $2"
+          }
+
+          confere "health público"            "$(status "$URL/api/v1/health/ready")" 200
+          confere "rota protegida sem token"  "$(status "$URL/api/v1/clientes")" 401
+          confere "token inválido"            "$(status -H 'Authorization: Bearer x' "$URL/api/v1/clientes")" 403
+          confere "CPF inválido"              "$(status -X POST -H "$JSON" -d '{"cpf":"123"}' "$URL/auth/cpf")" 400
+          confere "CPF sem cadastro"          "$(status -X POST -H "$JSON" -d "{\"cpf\":\"$CPF_SEM_CADASTRO\"}" "$URL/auth/cpf")" 401
+
+          # Gestor entra e garante o cliente de demonstração (409 = já existe).
+          GESTOR=$(curl -fsS -X POST -H "$JSON" -d '{"username":"gestor","senha":"gestor123"}' \
+            "$URL/api/v1/auth/login" | jq -r .accessToken)
+          confere "gestor na rota protegida"  "$(status -H "Authorization: Bearer $GESTOR" "$URL/api/v1/clientes")" 200
+          CRIACAO=$(status -X POST -H "$JSON" -H "Authorization: Bearer $GESTOR" \
+            -d "{\"documento\":\"$CPF_DEMONSTRACAO\",\"nome\":\"Cliente Demonstração\"}" "$URL/api/v1/clientes")
+          case "$CRIACAO" in 201|409) echo "ok  cliente de demonstração → $CRIACAO";; *) echo "::error::criar cliente: $CRIACAO"; exit 1;; esac
+
+          # Cliente entra pelo CPF e usa o token no app.
+          CLIENTE=$(curl -fsS -X POST -H "$JSON" -d "{\"cpf\":\"$CPF_DEMONSTRACAO\"}" "$URL/auth/cpf" | jq -r .accessToken)
+          confere "cliente no acompanhamento" "$(status -H "Authorization: Bearer $CLIENTE" "$URL/api/v1/acompanhamento")" 200
+          confere "cliente em rota de gestor" "$(status -H "Authorization: Bearer $CLIENTE" "$URL/api/v1/clientes")" 403
+
+          {
+            echo "### Gateway de \`$AMBIENTE\`"
+            echo "- URL: $URL"
+            echo "- Login do cliente: \`POST $URL/auth/cpf\`"
+            echo "- Swagger: $URL/api/docs"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  destroy:
+    name: Destroy das stacks
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.confirmacao == 'destruir'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+
+      - name: Credenciais da AWS (sessão do Learner Lab)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Apagar homolog e prod
+        run: |
+          for AMBIENTE in homolog prod; do
+            sam delete --stack-name "oficina-auth-$AMBIENTE" --region "$AWS_REGION" --no-prompts
+          done
