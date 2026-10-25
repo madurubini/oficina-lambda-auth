@@ -85,7 +85,9 @@ oficina-app** (token de cliente em rota administrativa → 403, e o cliente só 
 - **Segredos como variáveis de ambiente da Lambda**, recebidos como parâmetros `NoEcho`. O
   caminho de produção seria o Secrets Manager, mas a Lambda na VPC sem NAT Gateway não o alcança
   sem um VPC endpoint, que cobra por hora.
-- **Logs em JSON**, com o `requestId` do Gateway, em grupos de log da própria stack (7 dias).
+- **Logs em JSON**, com o `requestId` do Gateway, em grupos de log da própria stack (7 dias). O
+  mesmo id segue para o app no cabeçalho `x-request-id`: o oficina-app o grava nos logs e no New
+  Relic, então uma chamada pode ser seguida do Gateway até o banco.
 
 ## Estrutura
 
@@ -114,7 +116,8 @@ O deploy descobre tudo na AWS pelos nomes combinados: `LabRole`, RDS `oficina-db
 group `oficina-lambdas`, subnets da VPC do banco e o Load Balancer do Service `oficina-api` no
 namespace do ambiente.
 
-O **smoke test** confere pelo Gateway: health público (200), rota protegida sem token (401), token
+O **smoke test** confere pelo Gateway: health público (200), o `requestId` do Gateway devolvido
+pelo app no `x-request-id`, rota protegida sem token (401), token
 inválido (403), CPF inválido (400), CPF sem cadastro (401), gestor na rota protegida (200) e o
 fluxo do cliente: cria o cliente de demonstração (CPF `529.982.247-25`), entra pelo CPF, lista as
 OSs dele (200) e é barrado numa rota de gestor (403).

@@ -215,6 +215,12 @@ jobs:
           confere "CPF inválido"              "$(status -X POST -H "$JSON" -d '{"cpf":"123"}' "$URL/auth/cpf")" 400
           confere "CPF sem cadastro"          "$(status -X POST -H "$JSON" -d "{\"cpf\":\"$CPF_SEM_CADASTRO\"}" "$URL/auth/cpf")" 401
 
+          # O app devolve no x-request-id o mesmo id que o Gateway deu à requisição.
+          CABECALHOS=$(curl -s -D - -o /dev/null "$URL/api/v1/health/ready" | tr -d '\r')
+          ID_GATEWAY=$(echo "$CABECALHOS" | awk -F': ' 'tolower($1)=="apigw-requestid"{print $2}')
+          ID_APP=$(echo "$CABECALHOS" | awk -F': ' 'tolower($1)=="x-request-id"{print $2}')
+          confere "requestId do Gateway no app" "${ID_APP:-vazio}" "$ID_GATEWAY"
+
           # Gestor entra e garante o cliente de demonstração (409 = já existe).
           GESTOR=$(curl -fsS -X POST -H "$JSON" -d '{"username":"gestor","senha":"gestor123"}' \
             "$URL/api/v1/auth/login" | jq -r .accessToken)
