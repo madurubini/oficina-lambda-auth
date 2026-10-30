@@ -85,6 +85,10 @@ oficina-app** (token de cliente em rota administrativa → 403, e o cliente só 
 - **Segredos como variáveis de ambiente da Lambda**, recebidos como parâmetros `NoEcho`. O
   caminho de produção seria o Secrets Manager, mas a Lambda na VPC sem NAT Gateway não o alcança
   sem um VPC endpoint, que cobra por hora.
+- **Limite de requisições no Gateway**: 50 por segundo (pico de 100) em todas as rotas e 5 por
+  segundo (pico de 10) no `POST /auth/cpf`; acima disso o Gateway responde 429. O CPF não é segredo,
+  e o limite freia quem tenta descobrir em massa quais CPFs são clientes. Vale para todos os
+  clientes somados, não por IP.
 - **Logs em JSON**, com o `requestId` do Gateway, em grupos de log da própria stack (7 dias). O
   mesmo id segue para o app no cabeçalho `x-request-id`: o oficina-app o grava nos logs e no New
   Relic, então uma chamada pode ser seguida do Gateway até o banco.
@@ -139,7 +143,7 @@ OSs dele (200) e é barrado numa rota de gestor (403).
 
 ```bash
 npm ci
-npm test                 # 43 testes, sem banco nem AWS
+npm test                 # testes unitários, sem banco nem AWS
 npm run test:cov         # com cobertura
 
 # Build igual ao do pipeline (o esbuild do projeto precisa estar no PATH)
@@ -159,17 +163,22 @@ curl -s $URL/api/v1/acompanhamento -H "Authorization: Bearer <accessToken>"
 curl -s -o /dev/null -w '%{http_code}\n' $URL/api/v1/clientes   # 401, barrado no Gateway
 ```
 
+O **Swagger** da API fica em `$URL/api/docs`, rota livre no Gateway que vai direto ao
+`oficina-app`.
+
 ## Derrubar
 
 Este repositório é o **primeiro** a cair: ④ → ③ → ② → ①.
 
 1. Actions → **SAM** → Run workflow → `destruir`.
-2. Depois, os namespaces do oficina-app (`kubectl delete namespace homolog prod`), o
-   `oficina-infra-db` e o `oficina-infra-k8s`.
+2. Enquanto ele roda, apague os namespaces do oficina-app (`kubectl delete namespace homolog prod`):
+   eles não dependem das Lambdas.
+3. Com o SAM verde, o `oficina-infra-db` e, por último, o `oficina-infra-k8s`.
 
-> A `auth-cpf` roda na VPC, e a AWS leva alguns minutos para soltar as interfaces de rede dela
-> depois que a função é apagada. Se o destroy do `oficina-infra-db` falhar apagando o security
-> group `oficina-lambdas` (`DependencyViolation`), espere uns 10 minutos e rode de novo.
+> **O passo 1 é demorado.** A `auth-cpf` roda na VPC, e o CloudFormation espera a AWS soltar as
+> interfaces de rede (ENIs) dela antes de dar a stack por apagada: **20 a 40 minutos por stack**.
+> É normal e não precisa de nada. Com o SAM verde, as ENIs já foram liberadas e o destroy do
+> `oficina-infra-db` apaga o security group `oficina-lambdas` sem travar.
 
 ## Custo
 
@@ -191,3 +200,12 @@ no S3 e por secrets do GitHub (nenhum importa código de outro):
 **Ordem para subir:** ① → ② → ③ → ④. **Ordem para derrubar:** ④ → ③ → ② → ①.
 
 Branches: **`main` = produção** (só recebe PR), **`homolog` = homologação**.
+
+## Documentação
+
+- **Diagramas de sequência:** [autenticação por CPF](https://github.com/madurubini/oficina-app/blob/homolog/docs/arquitetura.md#8-sequência-autenticação-por-cpf)
+  e [abertura de OS pelo Gateway](https://github.com/madurubini/oficina-app/blob/homolog/docs/arquitetura.md#9-sequência-abertura-de-os-na-nuvem).
+- **Diagrama de componentes** da nuvem inteira: [`arquitetura.md`, seção 7](https://github.com/madurubini/oficina-app/blob/homolog/docs/arquitetura.md#7-componentes-na-nuvem-fase-3).
+- **Proposta e alternativas** (Cognito, login no app, autorizador JWT nativo): [RFC 0003](https://github.com/madurubini/oficina-app/blob/homolog/docs/rfc/0003-autenticacao-por-cpf.md).
+- **Decisões:** [ADR 0002 — padrão de comunicação](https://github.com/madurubini/oficina-app/blob/homolog/docs/adr/0002-padrao-de-comunicacao.md) e
+  [ADR 0006 — AWS SAM](https://github.com/madurubini/oficina-app/blob/homolog/docs/adr/0006-aws-sam-para-as-lambdas.md).
