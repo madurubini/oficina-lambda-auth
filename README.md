@@ -132,6 +132,7 @@ OSs dele (200) e é barrado numa rota de gestor (403).
 | `DB_PASSWORD` | Secret | Senha do administrador do RDS (a mesma do `oficina-infra-db`); usada só para criar o `oficina_auth` |
 | `DB_PASSWORD_LEITURA` | Secret | Senha nova do `oficina_auth`. Gere com `openssl rand -hex 24` (só letras e números) |
 | `JWT_SECRET` | Secret | O mesmo do `oficina-app` |
+| `GESTOR_SENHA` | Secret | A mesma do `oficina-app`: o smoke test entra como gestor para criar o cliente de demonstração |
 | `TF_STATE_BUCKET` | Variable | Bucket do state do Terraform; o SAM guarda o pacote em `sam/<ambiente>/` |
 
 ## Como rodar localmente
