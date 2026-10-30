@@ -87,6 +87,9 @@ function obrigatoria(nome: string): string {
 function dependenciasDoAmbiente(): Dependencias {
   const segredo = obrigatoria('JWT_SECRET');
   const expiraEm = Number(process.env.JWT_EXPIRES_IN_SEGUNDOS ?? 3600);
+  if (!Number.isInteger(expiraEm) || expiraEm <= 0) {
+    throw new Error('JWT_EXPIRES_IN_SEGUNDOS deve ser um número inteiro de segundos.');
+  }
   return {
     clientes: new ClientesPostgres({
       host: obrigatoria('DB_HOST'),

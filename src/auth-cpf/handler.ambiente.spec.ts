@@ -33,6 +33,7 @@ describe('auth-cpf (handler montado pelo ambiente)', () => {
     Pool = (await import('pg')).Pool as unknown as jest.Mock;
     Pool.mockImplementation(() => ({
       query: jest.fn().mockResolvedValue({ rows: [{ id: 'cli-9' }] }),
+      on: jest.fn(),
     }));
   });
 
@@ -63,5 +64,13 @@ describe('auth-cpf (handler montado pelo ambiente)', () => {
     process.env = { ...original, ...AMBIENTE, DB_HOST: '' };
     const { handler } = await import('./handler');
     await expect(handler(evento('52998224725'))).rejects.toThrow('DB_HOST');
+  });
+
+  it('falha logo se a validade do token não for um número de segundos', async () => {
+    process.env = { ...original, ...AMBIENTE, JWT_EXPIRES_IN_SEGUNDOS: '1h' };
+    const { handler } = await import('./handler');
+    await expect(handler(evento('52998224725'))).rejects.toThrow(
+      'JWT_EXPIRES_IN_SEGUNDOS',
+    );
   });
 });

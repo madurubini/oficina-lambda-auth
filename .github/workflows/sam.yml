@@ -197,6 +197,8 @@ jobs:
 
       # Prova, pelo Gateway, cada regra da portaria.
       - name: Smoke test pelo Gateway
+        env:
+          GESTOR_SENHA: ${{ secrets.GESTOR_SENHA }}
         run: |
           URL=$(aws cloudformation describe-stacks --stack-name "oficina-auth-$AMBIENTE" \
             --query "Stacks[0].Outputs[?OutputKey=='UrlDoGateway'].OutputValue" --output text)
@@ -222,7 +224,8 @@ jobs:
           confere "requestId do Gateway no app" "${ID_APP:-vazio}" "$ID_GATEWAY"
 
           # Gestor entra e garante o cliente de demonstração (409 = já existe).
-          GESTOR=$(curl -fsS -X POST -H "$JSON" -d '{"username":"gestor","senha":"gestor123"}' \
+          LOGIN=$(jq -n --arg s "$GESTOR_SENHA" '{username: "gestor", senha: $s}')
+          GESTOR=$(curl -fsS -X POST -H "$JSON" -d "$LOGIN" \
             "$URL/api/v1/auth/login" | jq -r .accessToken)
           confere "gestor na rota protegida"  "$(status -H "Authorization: Bearer $GESTOR" "$URL/api/v1/clientes")" 200
           CRIACAO=$(status -X POST -H "$JSON" -H "Authorization: Bearer $GESTOR" \
