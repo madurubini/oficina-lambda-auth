@@ -60,6 +60,17 @@ Resources:
     Type: AWS::Serverless::HttpApi
     Properties:
       Description: !Sub Entrada única da Oficina (${Ambiente})
+      # Limite de requisições por segundo (somando todos os clientes) acima do
+      # qual o Gateway responde 429. Segura abuso e custo; não é limite por IP.
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 100
+        ThrottlingRateLimit: 50
+      # O login por CPF tem limite próprio, bem menor: o CPF não é segredo, e
+      # isso freia quem tenta descobrir em massa quais CPFs são clientes.
+      RouteSettings:
+        "POST /auth/cpf":
+          ThrottlingBurstLimit: 10
+          ThrottlingRateLimit: 5
 
   # Encaminha para o app mantendo o caminho original da requisição
   # (/api/v1/clientes → http://<load-balancer>/api/v1/clientes). Todas as

@@ -5,10 +5,12 @@ jest.mock('pg', () => ({ Pool: jest.fn() }));
 
 describe('ClientesPostgres', () => {
   const query = jest.fn();
+  const on = jest.fn();
 
   beforeEach(() => {
     query.mockReset();
-    (Pool as unknown as jest.Mock).mockImplementation(() => ({ query }));
+    on.mockReset();
+    (Pool as unknown as jest.Mock).mockImplementation(() => ({ query, on }));
   });
 
   const config = {
@@ -44,6 +46,21 @@ describe('ClientesPostgres', () => {
     expect(sql).toContain(`"tipoDocumento" = 'CPF'`);
     expect(sql).toContain('ativo = true');
     expect(parametros).toEqual(['52998224725']);
+  });
+
+  it('conexão ociosa perdida vira log, sem derrubar o processo', () => {
+    const aviso = jest.spyOn(console, 'log').mockImplementation(() => undefined);
+    new ClientesPostgres(config);
+
+    const [evento, ouvinte] = on.mock.calls[0];
+    expect(evento).toBe('error');
+    ouvinte(new Error('Connection terminated unexpectedly'));
+
+    expect(JSON.parse(aviso.mock.calls[0][0])).toMatchObject({
+      nivel: 'warn',
+      erro: 'Connection terminated unexpectedly',
+    });
+    aviso.mockRestore();
   });
 
   it('devolve null quando não encontra', async () => {

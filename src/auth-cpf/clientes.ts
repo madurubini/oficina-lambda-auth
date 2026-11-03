@@ -1,4 +1,5 @@
 import { Pool } from 'pg';
+import { log } from '../compartilhado/log';
 
 /** O que a Lambda precisa saber do cliente para emitir o token. */
 export interface ClienteAtivo {
@@ -46,6 +47,12 @@ export class ClientesPostgres implements Clientes {
       ssl: { rejectUnauthorized: false },
       max: 1,
       connectionTimeoutMillis: 5000,
+    });
+    // O RDS pode fechar a conexão parada enquanto o container dorme. O pg avisa
+    // com um evento 'error' no pool; sem quem o escute, o processo da Lambda cai.
+    // A próxima consulta abre outra conexão sozinha.
+    this.pool.on('error', (falha) => {
+      log('warn', 'Conexão ociosa com o banco perdida', { erro: falha.message });
     });
   }
 
